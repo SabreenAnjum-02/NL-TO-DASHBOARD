@@ -18,7 +18,6 @@ import re
 from typing import Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
-from google import genai
 
 
 def _clean_json_response(text: str) -> str:
