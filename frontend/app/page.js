@@ -28,7 +28,7 @@ import DashboardView from "./components/DashboardView";
 import TaskFlowView from "./components/TaskFlowView";
 import InsightsPanel from "./components/InsightsPanel";
 
-const API_BASE = "http://localhost:8000/api";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
 
 /* ======================================================================
    ROOT — State management (unchanged logic, new UI)
