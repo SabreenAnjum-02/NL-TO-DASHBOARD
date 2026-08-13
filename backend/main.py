@@ -29,7 +29,7 @@ app = FastAPI(
 # CORS for Next.js dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "https://nl-to-dashboard.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
