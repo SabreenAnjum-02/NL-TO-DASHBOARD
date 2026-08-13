@@ -13,3 +13,7 @@ langchain-community==0.2.16
 
 # google-generativeai removed due to conflict
 # Additional dependencies can be added as needed
+duckdb
+pdfplumber
+pandas
+langchain-openai
