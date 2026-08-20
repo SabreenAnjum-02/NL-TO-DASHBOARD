@@ -360,19 +360,25 @@ CRITICAL RULES:
 14. Do NOT use "stack" on line charts
 15. For categorical bar charts, ALWAYS sort the bars by the metric value (e.g., set "sort": "-y" or "-x" on the nominal axis) so top performers are easy to see.
 16. Set clean, human-readable "title" attributes inside every X and Y encoding.
+17. If the user asks for "Top N" (e.g., Top 5, Top 10), you MUST include a "transform" block to aggregate, rank, and filter the data BEFORE encoding.
 
-EXAMPLE of a correct sorted bar chart spec:
+EXAMPLE of a correct Top 5 sorted bar chart spec:
 {{
   "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
   "data": {{"values": []}},
+  "transform": [
+    {{"aggregate": [{{"op": "sum", "field": "Revenue", "as": "Total_Revenue"}}], "groupby": ["Category"]}},
+    {{"window": [{{"op": "row_number", "as": "rank"}}], "sort": [{{"field": "Total_Revenue", "order": "descending"}}]}},
+    {{"filter": "datum.rank <= 5"}}
+  ],
   "mark": "bar",
   "encoding": {{
     "x": {{"field": "Category", "type": "nominal", "sort": "-y", "title": "Product Category"}},
-    "y": {{"field": "Total_Sales", "type": "quantitative", "aggregate": "sum", "title": "Total Sales ($)"}},
+    "y": {{"field": "Total_Revenue", "type": "quantitative", "title": "Total Revenue ($)"}},
     "color": {{"field": "Category", "type": "nominal", "legend": null}},
     "tooltip": [
       {{"field": "Category", "type": "nominal", "title": "Category"}},
-      {{"field": "Total_Sales", "type": "quantitative", "aggregate": "sum", "title": "Sales"}}
+      {{"field": "Total_Revenue", "type": "quantitative", "title": "Sales"}}
     ]
   }}
 }}
