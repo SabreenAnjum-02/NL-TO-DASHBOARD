@@ -77,27 +77,31 @@ class AgentOrchestrator:
         First classifies intent: casual chat vs. data/visualization request.
         """
         from main import data_service
+        
+        # Step 0a: Get dataset profile
+        profile_text = ""
+        try:
+            dataset_info = data_service.get_summary(dataset_id)
+            profile = dataset_info["profile"]
+            profile_text = json.dumps(profile, indent=2, default=str)
+        except Exception:
+            pass # We'll handle this later if intent is data
 
-        # Step 0a: Intent Classification — is this a chat message or a data request?
-        intent = await self._classify_intent(query)
+        # Step 0b: Intent Classification
+        intent = await self._classify_intent(query, profile_text)
         if intent == "chat":
-            chat_response = await self._handle_chat(query)
+            chat_response = await self._handle_chat(query, profile_text)
             return {
                 "status": "chat_reply",
                 "message": chat_response,
             }
 
-        # Step 0b: Get dataset profile
-        try:
-            dataset_info = data_service.get_summary(dataset_id)
-            profile = dataset_info["profile"]
-        except Exception:
+        if not profile_text:
             return {
                 "status": "error",
                 "message": f"Dataset '{dataset_id}' not found. Please upload data first.",
             }
 
-        profile_text = json.dumps(profile, indent=2, default=str)
 
         # Step 1: Ambiguity Detection
         ambiguity_result = await self._detect_ambiguity(query, profile_text)
@@ -134,7 +138,7 @@ class AgentOrchestrator:
             "query": query,
         }
 
-    async def _classify_intent(self, query: str) -> str:
+    async def _classify_intent(self, query: str, profile_text: str = "") -> str:
         """
         Agent 0: Intent Classifier
         Determines if the user message is casual conversation or a data/visualization request.
@@ -155,23 +159,13 @@ class AgentOrchestrator:
         if lowered in chat_phrases or len(lowered) <= 3:
             return "chat"
 
-        # Fast shortcut: obvious data keywords → skip LLM call
-        data_keywords = [
-            "show", "chart", "graph", "plot", "dashboard", "visualize",
-            "analyze", "analysis", "compare", "trend", "sales", "revenue",
-            "distribution", "top", "bottom", "average", "total", "sum",
-            "count", "breakdown", "category", "region", "product", "monthly",
-            "quarterly", "yearly", "correlation", "report", "overview",
-            "insight", "kpi", "metric", "filter", "group by", "aggregate",
-        ]
-        if any(kw in lowered for kw in data_keywords):
-            return "data"
+        # Remove the aggressive data keywords shortcut so the LLM can decide
+        # based on context if it's a simple text question vs dashboard request.
 
-        # Borderline case: ask the LLM
         prompt = f"""Classify the following user message as either "chat" or "data".
 
-- "chat" = casual conversation, greetings, questions about the app, thanks, small talk
-- "data" = anything requesting data analysis, charts, visualizations, insights, dashboards, or questions about the dataset
+- "chat" = casual conversation, greetings, questions about the app, OR simple questions about the dataset that can be answered in a few sentences of text without needing charts (e.g. "what are the categories?", "how many rows?", "what is the dataset about?").
+- "data" = explicit requests for charts, visualizations, dashboards, plotting, or complex analysis where visual graphs are necessary.
 
 User message: "{query}"
 
@@ -184,21 +178,23 @@ Respond with ONLY one word: chat or data"""
         except Exception:
             return "data"  # Default to data on error
 
-    async def _handle_chat(self, query: str) -> str:
+    async def _handle_chat(self, query: str, profile_text: str = "") -> str:
         """
-        Handles casual/conversational messages with a friendly, context-aware response.
+        Handles casual/conversational messages and simple text-based data questions with a friendly, context-aware response.
         """
         prompt = f"""You are DataSense AI, a friendly and helpful data analysis assistant. 
-You help users explore their datasets by generating interactive dashboards and insights.
+You help users explore their datasets by generating interactive dashboards and answering questions.
 
-The user has sent you a casual message (not a data request). Respond naturally, warmly, and helpfully.
-Keep your response concise (1-3 sentences). If they say hi/hello, greet them back and briefly mention what you can do.
-If they ask what you can do, explain your capabilities clearly.
-If they say thanks, respond warmly.
+The user has sent a message that does NOT require a dashboard. 
+If it is a greeting or casual chat, respond naturally and warmly.
+If it is a question about their dataset, use the following Dataset Profile to answer it concisely.
+
+Dataset Profile:
+{profile_text}
 
 User message: "{query}"
 
-Respond naturally:"""
+Respond concisely and accurately:"""
 
         try:
             response = self.llm.invoke([HumanMessage(content=prompt)])
@@ -339,7 +335,7 @@ User Query: "{query}"
 Task Plan:
 {json.dumps(task_plan, indent=2)}
 
-Generate 2-4 Vega-Lite v5 chart specifications that together form a comprehensive dashboard answering the user's query.
+Generate 1-3 highly relevant Vega-Lite v5 chart specifications that directly answer the user's query. DO NOT generate unnecessary charts.
 
 For each chart, use the ACTUAL column names from the dataset profile. Use appropriate chart types:
 - Bar chart for comparisons across categories
@@ -359,22 +355,24 @@ CRITICAL RULES:
 9. For bar charts, use "mark": "bar"
 10. For line charts, use "mark": {{"type": "line", "point": true}}
 11. For pie/donut charts, use "mark": {{"type": "arc", "innerRadius": 50}} with "theta" and "color" encodings
-12. Keep chart titles concise and descriptive
+12. Keep chart titles concise, descriptive, and human-readable
 13. Do NOT use "timeUnit" on non-date fields
 14. Do NOT use "stack" on line charts
+15. For categorical bar charts, ALWAYS sort the bars by the metric value (e.g., set "sort": "-y" or "-x" on the nominal axis) so top performers are easy to see.
+16. Set clean, human-readable "title" attributes inside every X and Y encoding.
 
-EXAMPLE of a correct bar chart spec:
+EXAMPLE of a correct sorted bar chart spec:
 {{
   "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
   "data": {{"values": []}},
   "mark": "bar",
   "encoding": {{
-    "x": {{"field": "Category", "type": "nominal", "title": "Category"}},
-    "y": {{"field": "Total_Sales", "type": "quantitative", "aggregate": "sum", "title": "Total Sales"}},
-    "color": {{"field": "Category", "type": "nominal"}},
+    "x": {{"field": "Category", "type": "nominal", "sort": "-y", "title": "Product Category"}},
+    "y": {{"field": "Total_Sales", "type": "quantitative", "aggregate": "sum", "title": "Total Sales ($)"}},
+    "color": {{"field": "Category", "type": "nominal", "legend": null}},
     "tooltip": [
-      {{"field": "Category", "type": "nominal"}},
-      {{"field": "Total_Sales", "type": "quantitative", "aggregate": "sum"}}
+      {{"field": "Category", "type": "nominal", "title": "Category"}},
+      {{"field": "Total_Sales", "type": "quantitative", "aggregate": "sum", "title": "Sales"}}
     ]
   }}
 }}
