@@ -98,8 +98,6 @@ class DataService:
                 else:
                     # Concatenate only the clean data sheets
                     df = pd.concat(all_dfs, ignore_index=True)
-                    # Fill missing values with empty strings so DuckDB can handle the mixed columns gracefully
-                    df = df.fillna("")
                 
                 self.db.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
             elif file_ext == ".json":
