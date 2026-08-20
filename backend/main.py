@@ -76,14 +76,30 @@ class DataService:
                 dfs = pd.read_excel(safe_path, sheet_name=None)
                 all_dfs = []
                 for sheet, d in dfs.items():
+                    # SMART FILTER: Skip instruction manuals, summary dashboards, and master lists
+                    # which confuse the AI with non-transactional text
+                    lower_name = sheet.lower()
+                    if "how to" in lower_name or "dashboard" in lower_name or "master" in lower_name:
+                        continue
+                    
+                    # Clean up: Drop completely empty rows and columns
+                    d = d.dropna(how='all').dropna(axis=1, how='all')
+                    if len(d) == 0:
+                        continue
+                        
+                    # Ensure column names are clean strings
+                    d.columns = [str(c).strip().replace('\n', ' ') for c in d.columns]
+                    
                     d['Sheet_Name'] = sheet  # Add sheet name so AI knows where data came from
                     all_dfs.append(d)
                 
-                # Concatenate all 19 sheets into one massive dataset
-                df = pd.concat(all_dfs, ignore_index=True)
-                
-                # Fill missing values with empty strings so DuckDB can handle the mixed columns gracefully
-                df = df.fillna("")
+                if not all_dfs:
+                    df = pd.DataFrame({"Error": ["No valid data tables found in Excel"]})
+                else:
+                    # Concatenate only the clean data sheets
+                    df = pd.concat(all_dfs, ignore_index=True)
+                    # Fill missing values with empty strings so DuckDB can handle the mixed columns gracefully
+                    df = df.fillna("")
                 
                 self.db.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
             elif file_ext == ".json":
