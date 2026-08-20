@@ -73,11 +73,18 @@ class DataService:
                 self.db.execute(f"CREATE TABLE {table_name} AS SELECT * FROM read_csv_auto('{safe_path}')")
             elif file_ext in [".xlsx", ".xls"]:
                 import pandas as pd
-                # Read all sheets into a dictionary of DataFrames
                 dfs = pd.read_excel(safe_path, sheet_name=None)
-                # Concatenate all sheets into one massive dataset
-                df = pd.concat(dfs.values(), ignore_index=True)
-                # DuckDB can natively query pandas DataFrames in the local scope!
+                all_dfs = []
+                for sheet, d in dfs.items():
+                    d['Sheet_Name'] = sheet  # Add sheet name so AI knows where data came from
+                    all_dfs.append(d)
+                
+                # Concatenate all 19 sheets into one massive dataset
+                df = pd.concat(all_dfs, ignore_index=True)
+                
+                # Fill missing values with empty strings so DuckDB can handle the mixed columns gracefully
+                df = df.fillna("")
+                
                 self.db.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
             elif file_ext == ".json":
                 self.db.execute(f"CREATE TABLE {table_name} AS SELECT * FROM read_json_auto('{safe_path}')")
