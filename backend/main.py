@@ -98,7 +98,19 @@ class DataService:
                 else:
                     # Concatenate only the clean data sheets
                     df = pd.concat(all_dfs, ignore_index=True)
-                
+                    
+                    # SMART TYPE CASTING: Excel often mixes text (like "Total" or "N/A") into numeric columns.
+                    # This converts columns to numeric if >50% of their values are numbers, coercing text to NaN.
+                    for col in df.columns:
+                        if col == 'Sheet_Name':
+                            continue
+                        numeric_col = pd.to_numeric(df[col], errors='coerce')
+                        orig_non_nulls = df[col].notna().sum()
+                        if orig_non_nulls > 0:
+                            new_non_nulls = numeric_col.notna().sum()
+                            if new_non_nulls / orig_non_nulls > 0.5:
+                                df[col] = numeric_col
+                                
                 self.db.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
             elif file_ext == ".json":
                 self.db.execute(f"CREATE TABLE {table_name} AS SELECT * FROM read_json_auto('{safe_path}')")
