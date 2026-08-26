@@ -128,18 +128,36 @@ export default function Home() {
       setIsQuerying(true);
       setError(null);
       setClarificationNeeded(null);
+
+      // Build context from last 4 non-system messages
+      const recentContext = chatHistory
+        .filter(m => m.role !== "system")
+        .slice(-4)
+        .map(m => `${m.role}: ${m.content}`)
+        .join('\\n');
+
       setChatHistory((prev) => [...prev, { role: "user", content: query }]);
+      
       try {
         const res = await fetch(`${API_BASE}/query/ask`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query, dataset_id: datasetInfo.dataset_id }),
+          body: JSON.stringify({ 
+            query, 
+            dataset_id: datasetInfo.dataset_id,
+            context: recentContext
+          }),
         });
+        
         if (!res.ok) {
           const err = await res.json();
+          if (err.detail === "session_expired") {
+            throw new Error("session_expired");
+          }
           throw new Error(err.detail || "Query failed");
         }
         const data = await res.json();
+        
         if (data.status === "chat_reply") {
           setChatHistory((prev) => [
             ...prev,
@@ -147,6 +165,24 @@ export default function Home() {
               role: "assistant",
               content: data.message,
               type: "chat",
+            },
+          ]);
+        } else if (data.status === "text_answer") {
+          setChatHistory((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: data.message,
+              type: "text_answer",
+            },
+          ]);
+        } else if (data.status === "table_answer") {
+          setChatHistory((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: data.message,
+              type: "table",
             },
           ]);
         } else if (data.status === "clarification_needed") {
@@ -177,20 +213,32 @@ export default function Home() {
           throw new Error(data.message || "Unknown error");
         }
       } catch (err) {
-        setError(err.message);
-        setChatHistory((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: `Error: ${err.message}`,
-            type: "error",
-          },
-        ]);
+        if (err.message === "session_expired" || err.message.includes("session_expired")) {
+           setError("Your session expired (server restarted). Please re-upload your file.");
+           setChatHistory((prev) => [
+             ...prev,
+             {
+               role: "assistant",
+               content: "⚠️ Your session expired because the server restarted. Please re-upload your file to continue.",
+               type: "error",
+             },
+           ]);
+        } else {
+           setError(err.message);
+           setChatHistory((prev) => [
+             ...prev,
+             {
+               role: "assistant",
+               content: `Error: ${err.message}`,
+               type: "error",
+             },
+           ]);
+        }
       } finally {
         setIsQuerying(false);
       }
     },
-    [datasetInfo]
+    [datasetInfo, chatHistory]
   );
 
   return (

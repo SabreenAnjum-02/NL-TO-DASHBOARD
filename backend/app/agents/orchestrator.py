@@ -1,17 +1,3 @@
-"""
-Agent Orchestrator - The brain of InsightFlow.
-Coordinates multiple specialized AI agents in a pipeline:
-
-1. Ambiguity Detector   → Checks if the query is clear enough
-2. Domain Detector      → Identifies the business domain
-3. Task Planner         → Breaks the goal into sub-tasks (DAG)
-4. Visual Generator     → Generates Vega-Lite specifications
-5. Self-Corrector       → Validates and fixes generated specs
-6. Insight Generator    → Produces business insights
-
-Uses Google Gemini via LangChain for LLM capabilities.
-"""
-
 import os
 import json
 import re
@@ -30,7 +16,6 @@ def _clean_json_response(text: str) -> str:
         text = fence_match.group(1).strip()
 
     # Try to find JSON array or object boundaries
-    # Find first [ or { and last ] or }
     start_arr = text.find('[')
     start_obj = text.find('{')
 
@@ -38,12 +23,10 @@ def _clean_json_response(text: str) -> str:
         return text
 
     if start_arr != -1 and (start_obj == -1 or start_arr < start_obj):
-        # Looks like a JSON array
         end = text.rfind(']')
         if end != -1:
             return text[start_arr:end + 1]
     elif start_obj != -1:
-        # Looks like a JSON object
         end = text.rfind('}')
         if end != -1:
             return text[start_obj:end + 1]
@@ -74,12 +57,14 @@ class AgentOrchestrator:
     ) -> dict:
         """
         Main pipeline: Process a natural language query and return dashboard specifications.
-        First classifies intent: casual chat vs. data/visualization request.
         """
         from main import data_service
         
+        context_str = context or ""
+
         # Step 0a: Get dataset profile
         profile_text = ""
+        profile = {}
         try:
             dataset_info = data_service.get_summary(dataset_id)
             profile = dataset_info["profile"]
@@ -88,9 +73,9 @@ class AgentOrchestrator:
             pass # We'll handle this later if intent is data
 
         # Step 0b: Intent Classification
-        intent = await self._classify_intent(query, profile_text)
+        intent = await self._classify_intent(query, profile_text, context_str)
         if intent == "chat":
-            chat_response = await self._handle_chat(query, profile_text)
+            chat_response = await self._handle_chat(query, profile_text, context_str)
             return {
                 "status": "chat_reply",
                 "message": chat_response,
@@ -102,6 +87,23 @@ class AgentOrchestrator:
                 "message": f"Dataset '{dataset_id}' not found. Please upload data first.",
             }
 
+        # Step 0c: Output Type Decision
+        output_type = await self._decide_output_type(query, profile_text)
+        
+        if output_type == "text_answer":
+            text_resp = await self._execute_and_format_query(query, profile_text, dataset_id, context_str, format_as="text")
+            return {
+                "status": "text_answer",
+                "message": text_resp,
+            }
+        elif output_type == "table":
+            table_resp = await self._execute_and_format_query(query, profile_text, dataset_id, context_str, format_as="table")
+            return {
+                "status": "table_answer",
+                "message": table_resp,
+            }
+
+        # For "chart" and "dashboard", proceed with visual generation
 
         # Step 1: Ambiguity Detection
         ambiguity_result = await self._detect_ambiguity(query, profile_text)
@@ -120,11 +122,14 @@ class AgentOrchestrator:
 
         # Step 4: Visual Generation (Vega-Lite specs)
         vega_specs = await self._generate_visualizations(
-            query, profile_text, domain, task_plan
+            query, profile_text, domain, task_plan, context_str
         )
 
-        # Step 5: Self-Correction (validate specs)
-        corrected_specs = await self._self_correct(vega_specs, profile)
+        # Step 4.5: Validate Analytical Correctness (Semantic intent validation)
+        validated_specs = await self._validate_analytical_correctness(query, vega_specs, profile_text)
+
+        # Step 5: Self-Correction (Structural & Column Name validation)
+        corrected_specs = await self._self_correct(validated_specs, profile)
 
         # Step 6: Generate insights summary
         insights = await self._generate_insights(query, profile_text, domain)
@@ -138,364 +143,283 @@ class AgentOrchestrator:
             "query": query,
         }
 
-    async def _classify_intent(self, query: str, profile_text: str = "") -> str:
-        """
-        Agent 0: Intent Classifier
-        Determines if the user message is casual conversation or a data/visualization request.
-        Returns 'chat' or 'data'.
-        """
-        lowered = query.strip().lower()
-
-        # Fast shortcut: obvious greetings / casual phrases (no LLM call needed)
-        chat_phrases = [
-            "hi", "hello", "hey", "hii", "hiii", "yo", "sup",
-            "good morning", "good afternoon", "good evening", "good night",
-            "how are you", "what's up", "whats up", "wassup",
-            "thank you", "thanks", "thank", "bye", "goodbye", "see you",
-            "ok", "okay", "cool", "nice", "great", "awesome", "got it",
-            "who are you", "what are you", "what can you do", "help",
-            "what is this", "how does this work",
-        ]
-        if lowered in chat_phrases or len(lowered) <= 3:
+    async def _classify_intent(self, query: str, profile_text: str = "", context: str = "") -> str:
+        lowered = query.lower().strip()
+        chat_shortcuts = ["hello", "hi", "hey", "who are you", "help", "what can you do"]
+        if any(lowered == word or lowered.startswith(word + " ") for word in chat_shortcuts):
             return "chat"
 
-        # Remove the aggressive data keywords shortcut so the LLM can decide
-        # based on context if it's a simple text question vs dashboard request.
+        prompt = f"""Classify the following user message as either 'chat' or 'data'.
 
-        prompt = f"""Classify the following user message as either "chat" or "data".
+- 'chat': Greetings, casual conversation, questions about what you can do, or general help.
+- 'data': Any question asking to analyze, summarize, visualize, or query the uploaded dataset.
 
-- "chat" = casual conversation, greetings, questions about the app, OR simple questions about the dataset that can be answered in a few sentences of text without needing charts (e.g. "what are the categories?", "how many rows?", "what is the dataset about?").
-- "data" = explicit requests for charts, visualizations, dashboards, plotting, or complex analysis where visual graphs are necessary.
-
-User message: "{query}"
-
-Respond with ONLY one word: chat or data"""
-
-        try:
-            response = self.llm.invoke([HumanMessage(content=prompt)])
-            result = response.content.strip().lower()
-            return "chat" if "chat" in result else "data"
-        except Exception:
-            return "data"  # Default to data on error
-
-    async def _handle_chat(self, query: str, profile_text: str = "") -> str:
-        """
-        Handles casual/conversational messages and simple text-based data questions with a friendly, context-aware response.
-        """
-        prompt = f"""You are DataSense AI, a friendly and helpful data analysis assistant. 
-You help users explore their datasets by generating interactive dashboards and answering questions.
-
-The user has sent a message that does NOT require a dashboard. 
-If it is a greeting or casual chat, respond naturally and warmly.
-If it is a question about their dataset, use the following Dataset Profile to answer it concisely.
+Recent conversation context:
+{context}
 
 Dataset Profile:
 {profile_text}
 
 User message: "{query}"
 
-Respond concisely and accurately:"""
-
+Respond with ONLY the word 'chat' or 'data'.
+"""
         try:
             response = self.llm.invoke([HumanMessage(content=prompt)])
-            return response.content.strip()
+            result = response.content.strip().lower()
+            return "data" if "data" in result else "chat"
         except Exception:
-            return "Hello! 👋 I'm DataSense AI. I can help you analyze your data and create interactive dashboards. Just ask me a question about your dataset!"
+            return "data"
 
-    async def _detect_ambiguity(self, query: str, profile: str) -> dict:
-        """
-        Agent 1: Ambiguity Detector
-        Checks if the user's query is clear enough to proceed.
-        Favors immediate dashboard generation over annoying clarification loops.
-        """
+    async def _handle_chat(self, query: str, profile_text: str = "", context: str = "") -> str:
+        prompt = f"""You are InsightFlow, an AI data analyst.
+        
+Recent conversation context:
+{context}
+
+Dataset profile (if available):
+{profile_text}
+
+Respond conversationally to the user's message: "{query}"
+Keep it brief and helpful. If they have data uploaded, remind them they can ask you to analyze it or create charts.
+"""
+        response = self.llm.invoke([HumanMessage(content=prompt)])
+        return response.content.strip()
+
+    async def _decide_output_type(self, query: str, profile_text: str) -> str:
         lowered = query.lower()
-        # Immediately proceed for any general, broad, or follow-up request
-        general_terms = [
-            "dashboard", "analysis", "all", "no specific", "charts", "overview",
-            "visualize", "general", "anything", "whatever", "show", "give me",
-            "include", "create", "summary", "report", "clarification:"
-        ]
-        if any(term in lowered for term in general_terms) or len(query.strip()) < 3:
-            return {"is_ambiguous": False, "confidence": 1.0}
-
-        prompt = f"""You are an Ambiguity Detection Agent for a data visualization dashboard. Your goal is to keep user friction LOW.
-
-Analyze the user's query against the dataset profile:
+        explicit_chart = ["plot", "chart", "graph", "visualize", "visualise", "draw", "bar chart", "line chart", "pie chart", "scatter"]
+        if any(w in lowered for w in explicit_chart):
+            return "chart"
+        if "dashboard" in lowered:
+            return "dashboard"
+            
+        prompt = f"""You are an output-type decision agent.
 Dataset Profile:
-{profile}
+{profile_text}
 
 User Query: "{query}"
 
-CRITICAL RULE: If the query can be reasonably interpreted to build 2-4 standard visualization charts (e.g. key distributions, top metrics, category breakdowns), set "is_ambiguous" to FALSE. Always prefer making intelligent assumptions and generating charts instead of annoying the user with questions.
+Decide the most appropriate output type based on the COMPLETE SEMANTIC MEANING of this question.
 
-Set "is_ambiguous" to TRUE ONLY IF the query is completely nonsensical or impossible to visualize.
+Options:
+- "text_answer": A single, complete answer expressible as 1-2 sentences. 
+  (e.g., "How many rows?", "Total revenue?", "Which region has highest sales?")
+- "table": A list of items with multiple attributes.
+  (e.g., "List all products and prices", "Top 5 customers with their details")
+- "chart": A breakdown, comparison across categories, trend over time, distribution, or ranking that requires visual representation.
+  (e.g., "How did sales change monthly?", "Compare sales by region", "What is the monthly average?", "Top 10 products by revenue")
+- "dashboard": A broad overview or multiple metrics at once.
 
-Respond ONLY in JSON format:
-{{
-    "is_ambiguous": false,
-    "confidence": 1.0,
-    "questions": []
-}}"""
-
+IMPORTANT: When uncertain, do NOT generate a chart unless there is evidence that visualization is required. Text or table is preferred for ambiguous queries.
+Respond with ONLY one word: text_answer | table | chart | dashboard
+"""
         try:
             response = self.llm.invoke([HumanMessage(content=prompt)])
-            text = _clean_json_response(response.content)
-            res = json.loads(text)
-            # Extra safety check: if confidence is reasonably high or questions empty, set is_ambiguous to False
-            if not res.get("questions"):
-                res["is_ambiguous"] = False
-            return res
+            result = response.content.strip().lower()
+            if "dashboard" in result: return "dashboard"
+            if "table" in result: return "table"
+            if "chart" in result: return "chart"
+            return "text_answer"
         except Exception:
-            return {"is_ambiguous": False, "confidence": 1.0}
+            return "text_answer" # Safe fallback
 
-    async def _detect_domain(self, profile: str) -> str:
-        """
-        Agent 2: Domain Detector
-        Identifies the business domain of the dataset for context-aware analysis.
-        """
-        prompt = f"""You are a Domain Detection Agent. Analyze this dataset profile and identify the business domain.
+    async def _execute_and_format_query(self, query: str, profile_text: str, dataset_id: str, context: str, format_as: str) -> str:
+        from main import data_service
+        sql_prompt = f"""You are a SQL generation agent. Generate a single DuckDB SQL SELECT query to answer the user's question.
 
-Dataset Profile:
-{profile}
+Dataset profile (includes column names, types, samples, etc):
+{profile_text}
 
-Return a single short domain label such as: "E-Commerce", "Healthcare", "Finance", "Marketing", "Education", "Manufacturing", "Retail", "HR", "Sports", "Social Media", "IoT", "Supply Chain", etc.
+User question: "{query}"
+Recent context:
+{context}
 
-Return ONLY the domain label, nothing else."""
+Rules:
+- Return ONLY the SQL query, no markdown fences, no explanation.
+- Use "{{{{table}}}}" as the exact table name placeholder.
+- Use exact column names from the profile.
+- Limit results to 20 rows maximum.
 
+SQL:"""
+        try:
+            sql_response = self.llm.invoke([HumanMessage(content=sql_prompt)])
+            sql = sql_response.content.strip().strip("```sql").strip("```").strip()
+            
+            results = data_service.execute_query(dataset_id, sql)
+            
+            if not results:
+                return "The query returned no data."
+
+            if format_as == "table":
+                # Render markdown table manually since it's reliable
+                keys = list(results[0].keys())
+                header = "| " + " | ".join(keys) + " |"
+                sep = "|" + "|".join(["---"] * len(keys)) + "|"
+                rows = []
+                for row in results:
+                    rows.append("| " + " | ".join(str(row[k]) for k in keys) + " |")
+                return "\n".join([header, sep] + rows)
+            else:
+                results_text = str(results[:10])
+                format_prompt = f"""The user asked: "{query}"
+The database returned: {results_text}
+Write a clear, concise 1-2 sentence answer in plain English using these exact numbers. Do not mention the database or query."""
+                format_response = self.llm.invoke([HumanMessage(content=format_prompt)])
+                return format_response.content.strip()
+        except Exception as e:
+            return f"I was unable to compute the answer. Error: {str(e)}"
+
+    async def _detect_ambiguity(self, query: str, profile_text: str) -> dict:
+        prompt = f"""Analyze this query against the dataset profile to determine if it is TOO ambiguous to process.
+Dataset Profile: {profile_text}
+Query: "{query}"
+Only flag as ambiguous if a critical column reference is completely unknown. Be lenient.
+Return JSON format: {{"is_ambiguous": boolean, "questions": ["Clarification 1", ...]}}
+"""
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            result_json = json.loads(_clean_json_response(response.content))
+            return result_json
+        except Exception:
+            return {"is_ambiguous": False, "questions": []}
+
+    async def _detect_domain(self, profile_text: str) -> str:
+        prompt = f"""Given this dataset profile, identify the business domain (e.g., Sales, HR, Finance).
+Profile: {profile_text}
+Return ONLY a 1-3 word domain name."""
         response = self.llm.invoke([HumanMessage(content=prompt)])
-        return response.content.strip().strip('"')
+        return response.content.strip()
 
-    async def _plan_tasks(self, query: str, profile: str, domain: str) -> dict:
-        """
-        Agent 3: Recursive Task Planner
-        Breaks down the user's goal into a DAG of sub-tasks.
-        """
-        prompt = f"""You are a Task Planning Agent for a {domain} data visualization system.
+    async def _plan_tasks(self, query: str, profile_text: str, domain: str) -> dict:
+        prompt = f"""Create a DAG task plan for generating a dashboard to answer: "{query}"
+Domain: {domain}
+Profile: {profile_text}
+Return JSON: {{"tasks": [{{"id": "t1", "type": "chart", "description": "...", "dependencies": []}}]}}
+Keep it to 1-3 highly relevant charts."""
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            return json.loads(_clean_json_response(response.content))
+        except Exception:
+            return {"tasks": []}
 
-Dataset Profile:
-{profile}
+    async def _generate_visualizations(self, query: str, profile_text: str, domain: str, task_plan: dict, context: str) -> list:
+        prompt = f"""Generate Vega-Lite specifications based on this task plan.
+Query: "{query}"
+Context: {context}
+Profile: {profile_text}
+Plan: {json.dumps(task_plan, indent=2)}
+
+Rules for Vega-Lite:
+1. Return a JSON array of objects: [{{"id": "t1", "vega_lite_spec": {{"$schema": "...", "mark": "...", ...}}}}]
+2. DO NOT include "data" with "values". Use "data": {{"name": "dataset"}} as a placeholder.
+3. Use exact column names from the profile.
+4. For rankings / Top-N, ALWAYS use a transform with window/rank and filter. Use a horizontal bar chart (`"mark": "bar"`, y-axis = category, x-axis = value).
+5. For time series, use `"mark": "line"`.
+
+Return valid JSON array."""
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            specs = json.loads(_clean_json_response(response.content))
+            if not isinstance(specs, list):
+                specs = [specs]
+            return specs
+        except Exception as e:
+            return []
+
+    async def _validate_analytical_correctness(self, query: str, vega_specs: list, profile_text: str) -> list:
+        """Validates that the aggregation/grouping in the Vega spec matches the semantic intent of the query."""
+        if not vega_specs:
+            return vega_specs
+
+        prompt = f"""You are a strict data analysis validator. 
+Review the following Vega-Lite specifications to ensure the analytical operations (aggregations, groupings, filters) perfectly match the user's semantic intent.
 
 User Query: "{query}"
+Dataset Profile: {profile_text}
 
-Break down this query into a sequence of analytical sub-tasks. Each task should be a specific, actionable step.
+Vega-Lite Specs:
+{json.dumps(vega_specs, indent=2)}
 
-Respond in JSON format:
-{{
-    "goal": "High-level description of what the user wants",
-    "tasks": [
-        {{
-            "id": "task_1",
-            "description": "Description of the sub-task",
-            "type": "data_transform|aggregation|filtering|visualization|insight",
-            "depends_on": []
-        }},
-        {{
-            "id": "task_2",
-            "description": "Description",
-            "type": "visualization",
-            "depends_on": ["task_1"]
-        }}
-    ]
-}}
+Checklist:
+1. Did the user ask for an average but the spec uses "sum" (or vice-versa)?
+2. Is the time-grouping correct (e.g. month vs year)?
+3. Is a ranking request (e.g. "top 10") actually sorting and limiting?
+4. Are the axes mapped to the correct data types?
 
-Keep it to 3-6 tasks maximum. Return ONLY valid JSON, no markdown formatting."""
-
-        response = self.llm.invoke([HumanMessage(content=prompt)])
-
+If any spec has incorrect analytical operations, FIX the JSON specification so it calculates the right answer.
+Return the corrected JSON array of specifications exactly as provided (with your fixes). DO NOT return anything except the JSON array.
+"""
         try:
-            text = _clean_json_response(response.content)
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {
-                "goal": query,
-                "tasks": [
-                    {
-                        "id": "task_1",
-                        "description": "Analyze and visualize data",
-                        "type": "visualization",
-                        "depends_on": [],
-                    }
-                ],
-            }
-
-    async def _generate_visualizations(
-        self, query: str, profile: str, domain: str, task_plan: dict
-    ) -> list:
-        """
-        Agent 4: Visual Generator
-        Generates Vega-Lite specifications based on the task plan.
-        """
-        prompt = f"""You are a Visualization Generation Agent for a {domain} dashboard.
-
-Dataset Profile:
-{profile}
-
-User Query: "{query}"
-
-Task Plan:
-{json.dumps(task_plan, indent=2)}
-
-Generate 1-3 highly relevant Vega-Lite v5 chart specifications that directly answer the user's query. DO NOT generate unnecessary charts.
-
-For each chart, use the ACTUAL column names from the dataset profile. Use appropriate chart types:
-- Bar chart for comparisons across categories
-- Line chart for trends over time
-- Pie/donut chart for proportions (use "arc" mark with theta encoding)
-- Scatter plot for correlations between two numeric variables
-
-CRITICAL RULES:
-1. Use "$schema": "https://vega.github.io/schema/vega-lite/v5.json"
-2. Set "data": {{"values": []}} as placeholder — the frontend will inject real data
-3. For DATE/TIMESTAMP columns, ALWAYS set "type": "temporal" and add "timeUnit": "month" or "timeUnit": "yearmonth" for aggregation
-4. For categorical/text columns, ALWAYS set "type": "nominal"
-5. For numeric columns, ALWAYS set "type": "quantitative"
-6. For "field" values, use the EXACT column names from the profile (case-sensitive!)
-7. For aggregations, use "aggregate" inside the encoding (e.g., "aggregate": "sum")
-8. Always include "tooltip" with relevant fields
-9. For bar charts, use "mark": "bar"
-10. For line charts, use "mark": {{"type": "line", "point": true}}
-11. For pie/donut charts, use "mark": {{"type": "arc", "innerRadius": 50}} with "theta" and "color" encodings
-12. Keep chart titles concise, descriptive, and human-readable
-13. Do NOT use "timeUnit" on non-date fields
-14. Do NOT use "stack" on line charts
-15. For categorical bar charts, ALWAYS sort the bars by the metric value (e.g., set "sort": "-y" or "-x" on the nominal axis) so top performers are easy to see.
-16. Set clean, human-readable "title" attributes inside every X and Y encoding.
-17. If the user asks for "Top N" (e.g., Top 5, Top 10), you MUST include a "transform" block to aggregate, rank, and filter the data BEFORE encoding.
-
-EXAMPLE of a correct Top 5 sorted bar chart spec:
-{{
-  "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-  "data": {{"values": []}},
-  "transform": [
-    {{"aggregate": [{{"op": "sum", "field": "Revenue", "as": "Total_Revenue"}}], "groupby": ["Category"]}},
-    {{"window": [{{"op": "row_number", "as": "rank"}}], "sort": [{{"field": "Total_Revenue", "order": "descending"}}]}},
-    {{"filter": "datum.rank <= 5"}}
-  ],
-  "mark": "bar",
-  "encoding": {{
-    "x": {{"field": "Category", "type": "nominal", "sort": "-y", "title": "Product Category"}},
-    "y": {{"field": "Total_Revenue", "type": "quantitative", "title": "Total Revenue ($)"}},
-    "color": {{"field": "Category", "type": "nominal", "legend": null}},
-    "tooltip": [
-      {{"field": "Category", "type": "nominal", "title": "Category"}},
-      {{"field": "Total_Revenue", "type": "quantitative", "title": "Sales"}}
-    ]
-  }}
-}}
-
-Respond as a JSON array of objects:
-[
-    {{
-        "title": "Chart Title",
-        "description": "What this chart shows",
-        "vega_lite_spec": {{ ... complete Vega-Lite v5 spec ... }}
-    }}
-]
-
-Return ONLY valid JSON, no markdown formatting."""
-
-        response = self.llm.invoke([HumanMessage(content=prompt)])
-
-        try:
-            text = _clean_json_response(response.content)
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return [
-                {
-                    "title": "Error generating visualization",
-                    "description": "The LLM response could not be parsed",
-                    "vega_lite_spec": {},
-                }
-            ]
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            corrected = json.loads(_clean_json_response(response.content))
+            if isinstance(corrected, list):
+                return corrected
+            return vega_specs
+        except Exception:
+            return vega_specs
 
     async def _self_correct(self, vega_specs: list, profile: dict) -> list:
-        """
-        Agent 5: Self-Corrector
-        Validates Vega-Lite specs and fixes common issues.
-        Ensures column names match the actual dataset.
-        """
         cols = profile.get("columns", [])
-        valid_columns = {
-            col["name"] if isinstance(col, dict) else str(col)
-            for col in cols
-        }
+        valid_columns = set()
+        for col in cols:
+            if isinstance(col, dict):
+                valid_columns.add(col["name"])
+            else:
+                valid_columns.add(str(col))
+
         corrected = []
-
         for spec_obj in vega_specs:
-            if not isinstance(spec_obj, dict):
-                continue
-
             spec = spec_obj.get("vega_lite_spec", {})
-            if not isinstance(spec, dict):
+            if not spec:
                 continue
-
-            # Ensure required fields exist
+                
             if "$schema" not in spec:
                 spec["$schema"] = "https://vega.github.io/schema/vega-lite/v5.json"
-
-            if "data" not in spec:
-                spec["data"] = {"values": []}
-
             if "width" not in spec:
                 spec["width"] = "container"
-
             if "height" not in spec:
                 spec["height"] = 300
 
-            # Fix mark specification
-            if "mark" in spec and isinstance(spec["mark"], str):
-                pass  # Simple string marks are fine
-            elif "mark" in spec and isinstance(spec["mark"], dict):
-                if "type" not in spec["mark"]:
-                    spec["mark"]["type"] = "bar"
-
-            # Remove any title from config that might conflict
-            if "config" in spec and isinstance(spec["config"], dict):
-                # Keep user config but ensure it doesn't break rendering
-                pass
+            # Column Name Validation
+            if valid_columns:
+                bad_fields = self._find_bad_fields(spec, valid_columns)
+                if bad_fields:
+                    continue # Drop spec with invalid columns
 
             spec_obj["vega_lite_spec"] = spec
             corrected.append(spec_obj)
+            
+        return corrected
 
-        return corrected if corrected else [
-            {
-                "title": "Analysis Summary",
-                "description": "Unable to generate specific charts. Try a more specific query.",
-                "vega_lite_spec": {
-                    "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-                    "data": {"values": []},
-                    "mark": "bar",
-                    "width": "container",
-                    "height": 300,
-                },
-            }
-        ]
+    def _find_bad_fields(self, spec: dict, valid_columns: set) -> list:
+        bad = []
+        encoding = spec.get("encoding", {})
+        for channel, enc in encoding.items():
+            if isinstance(enc, dict) and "field" in enc:
+                if enc["field"] not in valid_columns:
+                    bad.append(enc["field"])
+        for transform in spec.get("transform", []):
+            if isinstance(transform, dict):
+                for agg in transform.get("aggregate", []):
+                    if "field" in agg and agg["field"] not in valid_columns:
+                        bad.append(agg["field"])
+                if "groupby" in transform:
+                    grp = transform["groupby"]
+                    if isinstance(grp, list):
+                        for g in grp:
+                            if g not in valid_columns: bad.append(g)
+                    elif isinstance(grp, str):
+                        if grp not in valid_columns: bad.append(grp)
+        return bad
 
-    async def _generate_insights(self, query: str, profile: str, domain: str) -> list:
-        """
-        Agent 6: Insight Generator
-        Generates human-readable business insights based on the data analysis.
-        """
-        prompt = f"""You are a Business Insight Agent for {domain} analytics.
-
-Dataset Profile:
-{profile}
-
-User Query: "{query}"
-
-Based on the data profile, generate 3-5 concise, actionable business insights.
-Each insight should be a clear sentence that a non-technical person can understand.
-Focus on patterns, anomalies, and actionable recommendations visible from the data statistics.
-
-Respond as a JSON array of strings:
-["Insight 1", "Insight 2", "Insight 3"]
-
-Return ONLY valid JSON, no markdown formatting."""
-
-        response = self.llm.invoke([HumanMessage(content=prompt)])
-
+    async def _generate_insights(self, query: str, profile_text: str, domain: str) -> list:
+        prompt = f"""Generate 3-4 bullet points of analytical insights or follow-up questions for this query.
+Query: "{query}"
+Profile: {profile_text}
+Return a JSON array of strings."""
         try:
-            text = _clean_json_response(response.content)
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return ["Unable to generate insights from the current data profile."]
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            return json.loads(_clean_json_response(response.content))
+        except Exception:
+            return ["Explore the generated charts for detailed insights."]
