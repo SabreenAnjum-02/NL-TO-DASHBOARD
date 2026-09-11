@@ -178,14 +178,19 @@ class DataService:
                 df = pd.DataFrame({"Error": ["No valid data tables found in Excel"]})
             else:
                 df = pd.concat(all_dfs, ignore_index=True)
-                # Smart type casting: coerce columns that are >50% numeric
+                # Smart type casting and safety fallback
                 for col in df.columns:
                     if col == "Sheet_Name":
                         continue
-                    numeric = pd.to_numeric(df[col], errors="coerce")
-                    orig_non_null = df[col].notna().sum()
-                    if orig_non_null > 0 and numeric.notna().sum() / orig_non_null > 0.5:
-                        df[col] = numeric
+                        
+                    if pd.api.types.is_object_dtype(df[col]):
+                        numeric = pd.to_numeric(df[col], errors="coerce")
+                        orig_non_null = df[col].notna().sum()
+                        if orig_non_null > 0 and numeric.notna().sum() / orig_non_null > 0.5:
+                            df[col] = numeric
+                        else:
+                            # Force completely to string to prevent duckdb mixed-type crash
+                            df[col] = df[col].astype(str).replace(["nan", "None", "<NA>"], None)
 
             self.db.execute(f'CREATE TABLE "{table_name}" AS SELECT * FROM df')
 
