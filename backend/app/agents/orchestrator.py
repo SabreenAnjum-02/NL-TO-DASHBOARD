@@ -298,7 +298,8 @@ SQL:"""
                 results_text = str(results[:10])
                 format_prompt = f"""The user asked: "{query}"
 The database returned: {results_text}
-Write a clear, concise 1-2 sentence answer in plain English using these exact numbers. Do not mention the database or query."""
+Write a clear, concise 1-2 sentence answer in plain English using these exact numbers. Do not mention the database or query.
+CRITICAL: If dealing with money, use the appropriate currency symbol (e.g., ₹ if the dataset appears to be Indian or default to ₹) or format the number exactly as it appears. Do NOT default to USD ($)."""
                 format_response = self.llm.invoke([HumanMessage(content=format_prompt)])
                 return format_response.content.strip()
         except Exception as e:
@@ -427,24 +428,34 @@ Return the corrected JSON array of specifications exactly as provided (with your
         return corrected
 
     def _find_bad_fields(self, spec: dict, valid_columns: set) -> list:
+        valid_local = set(valid_columns)
+        # First pass: collect derived fields created by Vega-Lite transforms
+        for transform in spec.get("transform", []):
+            if isinstance(transform, dict):
+                for agg in transform.get("aggregate", []):
+                    if isinstance(agg, dict) and "as" in agg:
+                        valid_local.add(agg["as"])
+                if "calculate" in transform and "as" in transform:
+                    valid_local.add(transform["as"])
+
         bad = []
         encoding = spec.get("encoding", {})
         for channel, enc in encoding.items():
             if isinstance(enc, dict) and "field" in enc:
-                if enc["field"] not in valid_columns:
+                if enc["field"] not in valid_local:
                     bad.append(enc["field"])
         for transform in spec.get("transform", []):
             if isinstance(transform, dict):
                 for agg in transform.get("aggregate", []):
-                    if "field" in agg and agg["field"] not in valid_columns:
+                    if isinstance(agg, dict) and "field" in agg and agg["field"] not in valid_local:
                         bad.append(agg["field"])
                 if "groupby" in transform:
                     grp = transform["groupby"]
                     if isinstance(grp, list):
                         for g in grp:
-                            if g not in valid_columns: bad.append(g)
+                            if g not in valid_local: bad.append(g)
                     elif isinstance(grp, str):
-                        if grp not in valid_columns: bad.append(grp)
+                        if grp not in valid_local: bad.append(grp)
         return bad
 
     async def _generate_insights(self, query: str, profile_text: str, domain: str) -> list:
