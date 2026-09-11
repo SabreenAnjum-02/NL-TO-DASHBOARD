@@ -58,90 +58,106 @@ class AgentOrchestrator:
         """
         Main pipeline: Process a natural language query and return dashboard specifications.
         """
-        from main import data_service
-        
-        context_str = context or ""
-
-        # Step 0a: Get dataset profile
-        profile_text = ""
-        profile = {}
         try:
-            dataset_info = data_service.get_summary(dataset_id)
-            profile = dataset_info["profile"]
-            profile_text = json.dumps(profile, indent=2, default=str)
-        except Exception:
-            pass # We'll handle this later if intent is data
+            from main import data_service
+            
+            context_str = context or ""
 
-        # Step 0b: Intent Classification
-        intent = await self._classify_intent(query, profile_text, context_str)
-        if intent == "chat":
-            chat_response = await self._handle_chat(query, profile_text, context_str)
+            # Step 0a: Get dataset profile
+            profile_text = ""
+            profile = {}
+            try:
+                dataset_info = data_service.get_summary(dataset_id)
+                profile = dataset_info["profile"]
+                profile_text = json.dumps(profile, indent=2, default=str)
+            except Exception as e:
+                if "session_expired" in str(e):
+                    raise e # Let the router handle session_expired specially
+                pass
+
+            # Step 0b: Intent Classification
+            intent = await self._classify_intent(query, profile_text, context_str)
+            if intent == "chat":
+                chat_response = await self._handle_chat(query, profile_text, context_str)
+                return {
+                    "status": "chat_reply",
+                    "message": chat_response,
+                }
+
+            if not profile_text:
+                return {
+                    "status": "error",
+                    "message": f"Dataset '{dataset_id}' not found. Please upload data first.",
+                }
+
+            # Step 0c: Output Type Decision
+            output_type = await self._decide_output_type(query, profile_text)
+            
+            if output_type == "text_answer":
+                text_resp = await self._execute_and_format_query(query, profile_text, dataset_id, context_str, format_as="text")
+                return {
+                    "status": "text_answer",
+                    "message": text_resp,
+                }
+            elif output_type == "table":
+                table_resp = await self._execute_and_format_query(query, profile_text, dataset_id, context_str, format_as="table")
+                return {
+                    "status": "table_answer",
+                    "message": table_resp,
+                }
+
+            # Step 1: Ambiguity Detection
+            ambiguity_result = await self._detect_ambiguity(query, profile_text)
+            if ambiguity_result.get("is_ambiguous"):
+                return {
+                    "status": "clarification_needed",
+                    "questions": ambiguity_result["questions"],
+                    "original_query": query,
+                }
+
+            # Step 2: Domain Detection
+            domain = await self._detect_domain(profile_text)
+
+            # Step 3: Task Planning
+            task_plan = await self._plan_tasks(query, profile_text, domain)
+
+            # Step 4: Visual Generation
+            vega_specs = await self._generate_visualizations(
+                query, profile_text, domain, task_plan, context_str
+            )
+
+            # Step 4.5: Validate Analytical Correctness
+            validated_specs = await self._validate_analytical_correctness(query, vega_specs, profile_text)
+
+            # Step 5: Self-Correction
+            corrected_specs = await self._self_correct(validated_specs, profile)
+            
+            # Safe fallback if charts failed
+            if not corrected_specs and output_type in ["chart", "dashboard"]:
+                 text_resp = await self._execute_and_format_query(query, profile_text, dataset_id, context_str, format_as="text")
+                 return {
+                     "status": "text_answer",
+                     "message": "I couldn't generate a reliable chart for this, but here is the data: " + text_resp,
+                 }
+
+            # Step 6: Generate insights
+            insights = await self._generate_insights(query, profile_text, domain)
+
             return {
-                "status": "chat_reply",
-                "message": chat_response,
+                "status": "success",
+                "domain": domain,
+                "task_plan": task_plan,
+                "charts": corrected_specs,
+                "insights": insights,
+                "query": query,
             }
-
-        if not profile_text:
-            return {
-                "status": "error",
-                "message": f"Dataset '{dataset_id}' not found. Please upload data first.",
-            }
-
-        # Step 0c: Output Type Decision
-        output_type = await self._decide_output_type(query, profile_text)
-        
-        if output_type == "text_answer":
-            text_resp = await self._execute_and_format_query(query, profile_text, dataset_id, context_str, format_as="text")
+        except Exception as e:
+            if "session_expired" in str(e):
+                raise e
             return {
                 "status": "text_answer",
-                "message": text_resp,
+                "message": f"I'm sorry, I encountered an unexpected error while analyzing your request: {str(e)}",
             }
-        elif output_type == "table":
-            table_resp = await self._execute_and_format_query(query, profile_text, dataset_id, context_str, format_as="table")
-            return {
-                "status": "table_answer",
-                "message": table_resp,
-            }
-
-        # For "chart" and "dashboard", proceed with visual generation
-
-        # Step 1: Ambiguity Detection
-        ambiguity_result = await self._detect_ambiguity(query, profile_text)
-        if ambiguity_result.get("is_ambiguous"):
-            return {
-                "status": "clarification_needed",
-                "questions": ambiguity_result["questions"],
-                "original_query": query,
-            }
-
-        # Step 2: Domain Detection
-        domain = await self._detect_domain(profile_text)
-
-        # Step 3: Task Planning (DAG generation)
-        task_plan = await self._plan_tasks(query, profile_text, domain)
-
-        # Step 4: Visual Generation (Vega-Lite specs)
-        vega_specs = await self._generate_visualizations(
-            query, profile_text, domain, task_plan, context_str
-        )
-
-        # Step 4.5: Validate Analytical Correctness (Semantic intent validation)
-        validated_specs = await self._validate_analytical_correctness(query, vega_specs, profile_text)
-
-        # Step 5: Self-Correction (Structural & Column Name validation)
-        corrected_specs = await self._self_correct(validated_specs, profile)
-
-        # Step 6: Generate insights summary
-        insights = await self._generate_insights(query, profile_text, domain)
-
-        return {
-            "status": "success",
-            "domain": domain,
-            "task_plan": task_plan,
-            "charts": corrected_specs,
-            "insights": insights,
-            "query": query,
-        }
 
     async def _classify_intent(self, query: str, profile_text: str = "", context: str = "") -> str:
         lowered = query.lower().strip()
@@ -238,17 +254,34 @@ Recent context:
 Rules:
 - Return ONLY the SQL query, no markdown fences, no explanation.
 - Use "{{{{table}}}}" as the exact table name placeholder.
-- Use exact column names from the profile.
+- ALWAYS wrap column names in double quotes (e.g. "Total Revenue").
 - Limit results to 20 rows maximum.
-- CRITICAL: If you need to cast a string column to a number for sorting or aggregation, ALWAYS use TRY_CAST(col AS DOUBLE) instead of CAST(), so it safely ignores text values.
+- CRITICAL: If you need to cast a string column to a number for sorting or aggregation, ALWAYS use TRY_CAST("col" AS DOUBLE) instead of CAST(), so it safely ignores text values.
 
 SQL:"""
+        sql = ""
+        results = None
+        error_msg = ""
+        
+        # Self-healing retry loop for SQL execution
+        for attempt in range(2):
+            try:
+                if attempt == 0:
+                    sql_response = self.llm.invoke([HumanMessage(content=sql_prompt)])
+                else:
+                    retry_prompt = sql_prompt + f"\n\nYour previous SQL query failed with this error: {error_msg}\nPlease fix the SQL query and try again. Ensure column names are exactly as they appear in the profile and wrap them in double quotes. Return ONLY the fixed SQL query."
+                    sql_response = self.llm.invoke([HumanMessage(content=retry_prompt)])
+                    
+                sql = sql_response.content.strip().strip("```sql").strip("```").strip()
+                results = data_service.execute_query(dataset_id, sql)
+                break  # Success!
+            except Exception as e:
+                error_msg = str(e)
+                
+        if results is None:
+            return f"I tried to analyze the data but ran into a calculation error. Could you rephrase your question? (Internal error: {error_msg})"
+
         try:
-            sql_response = self.llm.invoke([HumanMessage(content=sql_prompt)])
-            sql = sql_response.content.strip().strip("```sql").strip("```").strip()
-            
-            results = data_service.execute_query(dataset_id, sql)
-            
             if not results:
                 return "The query returned no data."
 
@@ -269,7 +302,7 @@ Write a clear, concise 1-2 sentence answer in plain English using these exact nu
                 format_response = self.llm.invoke([HumanMessage(content=format_prompt)])
                 return format_response.content.strip()
         except Exception as e:
-            return f"I was unable to compute the answer. Error: {str(e)}"
+            return f"I generated the data but couldn't format it properly. Error: {str(e)}"
 
     async def _detect_ambiguity(self, query: str, profile_text: str) -> dict:
         prompt = f"""Analyze this query against the dataset profile to determine if it is TOO ambiguous to process.
