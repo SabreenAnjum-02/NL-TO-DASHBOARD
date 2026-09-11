@@ -137,17 +137,40 @@ class DataService:
         elif file_ext in (".xlsx", ".xls"):
             import pandas as pd
 
-            dfs = pd.read_excel(safe_path, sheet_name=None)
+            # Read all sheets without headers first
+            dfs_raw = pd.read_excel(safe_path, sheet_name=None, header=None)
             all_dfs = []
-            for sheet, df in dfs.items():
+            for sheet, df in dfs_raw.items():
                 lower = sheet.lower()
                 # Skip non-data sheets (instruction manuals, summary dashboards, master lists)
-                if any(kw in lower for kw in ("how to", "dashboard", "master")):
+                if any(kw in lower for kw in ("how to", "dashboard", "master", "read me", "welcome")):
                     continue
+                
+                # Auto-detect header row (row with the most non-null columns in the first 20 rows)
+                header_idx = 0
+                max_non_nulls = 0
+                for i in range(min(20, len(df))):
+                    non_nulls = df.iloc[i].notna().sum()
+                    if non_nulls > max_non_nulls:
+                        max_non_nulls = non_nulls
+                        header_idx = i
+                
+                if max_non_nulls > 0:
+                    df.columns = df.iloc[header_idx]
+                    df = df.iloc[header_idx+1:].reset_index(drop=True)
+
                 df = df.dropna(how="all").dropna(axis=1, how="all")
                 if len(df) == 0:
                     continue
+                
+                # Clean column names
                 df.columns = [str(c).strip().replace("\n", " ") for c in df.columns]
+                # Ensure unique column names to prevent DuckDB errors
+                cols = pd.Series(df.columns)
+                for dup in cols[cols.duplicated()].unique():
+                    cols[cols[cols == dup].index.values.tolist()] = [f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))]
+                df.columns = cols
+
                 df["Sheet_Name"] = sheet
                 all_dfs.append(df)
 

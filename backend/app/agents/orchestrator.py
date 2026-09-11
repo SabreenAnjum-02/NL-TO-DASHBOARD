@@ -240,6 +240,7 @@ Rules:
 - Use "{{{{table}}}}" as the exact table name placeholder.
 - Use exact column names from the profile.
 - Limit results to 20 rows maximum.
+- CRITICAL: If you need to cast a string column to a number for sorting or aggregation, ALWAYS use TRY_CAST(col AS DOUBLE) instead of CAST(), so it safely ignores text values.
 
 SQL:"""
         try:
