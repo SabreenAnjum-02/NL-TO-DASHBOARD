@@ -142,8 +142,8 @@ class DataService:
             all_dfs = []
             for sheet, df in dfs_raw.items():
                 lower = sheet.lower()
-                # Skip non-data sheets (instruction manuals, summary dashboards, master lists)
-                if any(kw in lower for kw in ("how to", "dashboard", "master", "read me", "welcome")):
+                # Skip non-data sheets (instruction manuals, summary dashboards)
+                if any(kw in lower for kw in ("how to", "dashboard", "read me", "welcome")):
                     continue
                 
                 # Auto-detect header row (row with the most non-null columns in the first 20 rows)
@@ -379,7 +379,9 @@ class DataService:
         if not sql.strip().upper().startswith("SELECT"):
             raise ValueError("Only SELECT queries are permitted")
         table_name = self.datasets[dataset_id]["table_name"]
-        safe_sql = sql.replace("{{table}}", f'"{table_name}"')
+        # The LLM sometimes wraps {{table}} in quotes. Strip them before substituting.
+        safe_sql = sql.replace('\"{{table}}\"', "{{table}}").replace("\'{{table}}\'", "{{table}}")
+        safe_sql = safe_sql.replace("{{table}}", f'"{table_name}"')
         result = self.db.execute(safe_sql).fetchall()
         cols = [d[0] for d in self.db.description]
         return [{c: v for c, v in zip(cols, row)} for row in result]
