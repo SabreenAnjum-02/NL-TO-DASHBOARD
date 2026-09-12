@@ -142,8 +142,8 @@ class DataService:
             all_dfs = []
             for sheet, df in dfs_raw.items():
                 lower = sheet.lower()
-                # Skip non-data sheets (instruction manuals, summary dashboards)
-                if any(kw in lower for kw in ("how to", "dashboard", "read me", "welcome")):
+                # Skip non-data sheets
+                if any(kw in lower for kw in ("how to", "read me", "welcome")):
                     continue
                 
                 # Auto-detect header row (row with the most non-null columns in the first 20 rows)
