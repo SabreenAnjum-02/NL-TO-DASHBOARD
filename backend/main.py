@@ -259,10 +259,14 @@ class DataService:
                 ).fetchone()[0]
                 col_info["null_count"] = null_count
 
-                # 3 distinct sample values
+                # Smart sampling: Get all sheet names, up to 10 for low-cardinality, or 3 for high-cardinality
+                limit_clause = "LIMIT 3"
+                if col_name == "Sheet_Name":
+                    limit_clause = "" # Get all sheets so LLM knows exactly what's available
+                
                 raw_samples = self.db.execute(
                     f'SELECT DISTINCT "{col_name}" FROM "{table_name}" '
-                    f'WHERE "{col_name}" IS NOT NULL LIMIT 3'
+                    f'WHERE "{col_name}" IS NOT NULL {limit_clause}'
                 ).fetchall()
                 col_info["samples"] = [str(r[0]) for r in raw_samples]
 
@@ -297,9 +301,16 @@ class DataService:
                         f'SELECT APPROX_COUNT_DISTINCT("{col_name}") FROM "{table_name}"'
                     ).fetchone()[0]
                     col_info["distinct_count"] = distinct
-                    # Cardinality hints help agents avoid unreadable pie/bar charts
+                    
+                    # If it's a low cardinality column (not Sheet_Name, since that's already fetched), fetch up to 10 samples
                     if distinct <= 10:
                         col_info["cardinality"] = "low"      # ideal for pie / colour encoding
+                        if col_name != "Sheet_Name":
+                            raw_samples_ext = self.db.execute(
+                                f'SELECT DISTINCT "{col_name}" FROM "{table_name}" '
+                                f'WHERE "{col_name}" IS NOT NULL LIMIT 10'
+                            ).fetchall()
+                            col_info["samples"] = [str(r[0]) for r in raw_samples_ext]
                     elif distinct <= 50:
                         col_info["cardinality"] = "medium"   # ok for bar groupby
                     else:
