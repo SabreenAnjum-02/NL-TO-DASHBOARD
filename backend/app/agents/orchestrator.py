@@ -257,6 +257,7 @@ Rules:
 - ALWAYS wrap column names in double quotes (e.g. "Total Revenue").
 - Limit results to 20 rows maximum.
 - CRITICAL: If you need to cast a string column to a number for sorting or aggregation, ALWAYS use TRY_CAST("col" AS DOUBLE) instead of CAST(), so it safely ignores text values.
+- CRITICAL: This table contains data concatenated from multiple Excel sheets. The "Sheet_Name" column tells you which sheet a row came from. When calculating totals, sums, or aggregations, you MUST filter by a specific "Sheet_Name" (e.g. WHERE "Sheet_Name" = '08. PER-EVENT P&L') to avoid double-counting data that appears in multiple summary sheets!
 
 SQL:"""
         sql = ""
