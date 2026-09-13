@@ -152,11 +152,17 @@ class AgentOrchestrator:
                 "query": query,
             }
         except Exception as e:
-            if "session_expired" in str(e):
+            error_str = str(e)
+            if "session_expired" in error_str:
                 raise e
+            if "402" in error_str or "credits" in error_str.lower():
+                return {
+                    "status": "text_answer",
+                    "message": "⚠️ **API Limit Reached:** Your OpenRouter API account has run out of credits or hit a rate limit. Please add credits at [openrouter.ai/settings/credits](https://openrouter.ai/settings/credits) to continue generating insights and dashboards.",
+                }
             return {
                 "status": "text_answer",
-                "message": f"I'm sorry, I encountered an unexpected error while analyzing your request: {str(e)}",
+                "message": f"I'm sorry, I encountered an unexpected error while analyzing your request: {error_str}",
             }
 
     async def _classify_intent(self, query: str, profile_text: str = "", context: str = "") -> str:
@@ -279,6 +285,8 @@ SQL:"""
                 break  # Success!
             except Exception as e:
                 error_msg = str(e)
+                if "402" in error_msg or "credits" in error_msg.lower():
+                    return "⚠️ **API Limit Reached:** Your OpenRouter API account has run out of credits or hit a rate limit. Please add credits at openrouter.ai/settings/credits."
                 
         if results is None:
             return f"I tried to analyze the data but ran into a calculation error. Could you rephrase your question? (Internal error: {error_msg})"
