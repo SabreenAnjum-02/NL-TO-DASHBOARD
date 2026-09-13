@@ -258,6 +258,14 @@ class DataService:
                     f'SELECT COUNT(*) FROM "{table_name}" WHERE "{col_name}" IS NULL'
                 ).fetchone()[0]
                 col_info["null_count"] = null_count
+                
+                # Identify which sheets actually contain data for this column
+                if col_name != "Sheet_Name":
+                    valid_sheets_raw = self.db.execute(
+                        f'SELECT DISTINCT "Sheet_Name" FROM "{table_name}" '
+                        f'WHERE "{col_name}" IS NOT NULL LIMIT 5'
+                    ).fetchall()
+                    col_info["valid_sheets"] = [str(r[0]) for r in valid_sheets_raw]
 
                 # Smart sampling: Get all sheet names, up to 10 for low-cardinality, or 3 for high-cardinality
                 limit_clause = "LIMIT 3"
