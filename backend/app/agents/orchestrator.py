@@ -352,6 +352,7 @@ Rules for Vega-Lite:
 3. Use exact column names from the profile.
 4. For rankings / Top-N, ALWAYS use a transform with window/rank and filter. Use a horizontal bar chart (`"mark": "bar"`, y-axis = category, x-axis = value).
 5. For time series, use `"mark": "line"`.
+6. CRITICAL: Your dataset contains concatenated sheets. You MUST filter out null values for the primary fields you are visualizing using a transform (e.g., `{{"filter": "datum['Client Name'] != null"}}`). Otherwise, 'null' will dominate the charts!
 
 Return valid JSON array."""
         try:
