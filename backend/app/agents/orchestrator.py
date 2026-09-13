@@ -257,6 +257,7 @@ Rules:
 - ALWAYS wrap column names in double quotes (e.g. "Total Revenue").
 - Limit results to 20 rows maximum.
 - CRITICAL: If you need to cast a string column to a number for sorting or aggregation, ALWAYS use TRY_CAST("col" AS DOUBLE) instead of CAST(), so it safely ignores text values.
+- CRITICAL: If your query groups by or selects a categorical entity (like "Client Name"), you MUST add `WHERE "Col" IS NOT NULL` to prevent returning blank or 'None' rows.
 - CRITICAL: This table concatenates multiple Excel sheets. The "Sheet_Name" column tells you which sheet a row came from. When querying a specific column, look at its 'valid_sheets' property in the profile, and ALWAYS filter your query using WHERE "Sheet_Name" = '...' to pick the correct sheet! If you don't filter, you will get NULLs or double-counted data.
 
 SQL:"""
@@ -417,6 +418,19 @@ Return the corrected JSON array of specifications exactly as provided (with your
                 spec["width"] = "container"
             if "height" not in spec:
                 spec["height"] = 300
+
+            # Programmatically guarantee NO null values in charts
+            if "transform" not in spec:
+                spec["transform"] = []
+                
+            fields_to_filter = set()
+            for channel, enc in spec.get("encoding", {}).items():
+                if isinstance(enc, dict) and "field" in enc:
+                    fields_to_filter.add(enc["field"])
+                    
+            for field in fields_to_filter:
+                filter_expr = f"isValid(datum['{field}']) && datum['{field}'] != null && datum['{field}'] != 'null' && datum['{field}'] != 'None' && datum['{field}'] != 'NaN'"
+                spec["transform"].append({"filter": filter_expr})
 
             # Column Name Validation
             if valid_columns:
