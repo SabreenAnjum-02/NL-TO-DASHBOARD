@@ -37,7 +37,16 @@ def _clean_json_response(text: str) -> str:
 class AgentOrchestrator:
 
     def __init__(self):
-        self.llm = ChatOpenAI(temperature=0, model_name="anthropic/claude-3-haiku")
+        api_key = os.getenv("OPENROUTER_API_KEY", os.getenv("OPENAI_API_KEY"))
+        if not api_key:
+            raise Exception("OPENROUTER_API_KEY not configured.")
+
+        self.llm = ChatOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+            model="openai/gpt-4o-mini",
+            temperature=0.2
+        )
         
     async def _classify_intent(self, query: str, profile_text: str, context: str) -> str:
         prompt = "Classify user intent: 'chat' (general greeting) or 'analytical' (data query).\nQuery: " + query + "\nReply ONLY with 'chat' or 'analytical'."
