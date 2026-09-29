@@ -278,9 +278,11 @@ class AgentOrchestrator:
                 })
 
             return {
-                "status": "dashboard",
-                "dashboardData": dashboardData,
-                "insights": insights
+                "status": "success",
+                "charts": dashboardData,
+                "insights": insights,
+                "domain": domain,
+                "task_plan": []
             }
         except Exception as e:
             return {"status": "error", "message": "An unexpected error occurred: " + str(e)}
