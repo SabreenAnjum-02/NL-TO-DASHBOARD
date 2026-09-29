@@ -169,9 +169,9 @@ function ChartCard({ chart, index, dataRows }) {
         height: expanded ? 480 : 260,
         background: "transparent",
         data:
-          dataRows && dataRows.length > 0
-            ? { values: dataRows }
-            : chart.vega_lite_spec.data || { values: [] },
+          chart.vega_lite_spec.data && chart.vega_lite_spec.data.values && chart.vega_lite_spec.data.values.length > 0
+            ? chart.vega_lite_spec.data
+            : (dataRows && dataRows.length > 0 ? { values: dataRows } : { values: [] }),
         config: {
           axis: {
             labelColor: "#94A3B8",
